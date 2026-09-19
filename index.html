@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#07131f" />
-  <title>OCR câu hỏi trắc nghiệm bằng Camera</title>
+  <title>OCR câu hỏi trắc nghiệm bằng Camera v2</title>
 
   <!-- OCR chạy trên trình duyệt, cần Internet để tải thư viện + bộ ngôn ngữ -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
@@ -60,8 +60,8 @@
       position:absolute;
       left:3%;
       right:3%;
-      top:14%;
-      bottom:8%;
+      top:18%;
+      bottom:7%;
       border:3px solid #34e07c;
       border-radius:14px;
       pointer-events:none;
@@ -75,8 +75,8 @@
       position:absolute;
       left:3%;
       right:3%;
-      top:3%;
-      height:9%;
+      top:7%;
+      height:8%;
       border:2px dashed #ffcc66;
       border-radius:10px;
       color:#ffe8ad;
@@ -300,7 +300,7 @@
       .gemini-answer{min-height:42px;padding:8px;font-size:13px}
       .gemini-note{display:none}
       .api-input{padding:7px 8px;font-size:11px}
-      .guide{top:14%;bottom:5%}
+      .guide{top:18%;bottom:5%}
       .ignore-band{top:2%;height:9%}
     }
   </style>
@@ -321,7 +321,7 @@
     </div>
 
     <div class="ignore-band">
-      KHÔNG OCR VÙNG NÀY — đặt thanh tiêu đề đen vào đây
+      ĐẶT THANH TIÊU ĐỀ ĐEN Ở VÙNG NÀY — OCR sẽ bỏ qua
     </div>
 
     <div class="guide" id="guide">
@@ -338,10 +338,10 @@
   </section>
 
   <aside class="result-panel">
-    <h1>OCR câu hỏi trắc nghiệm</h1>
+    <h1>OCR câu hỏi trắc nghiệm <span style="font-size:11px;color:#78f7ab">v2 chống moiré</span></h1>
     <p class="sub">
-      Đặt phần tiêu đề nền đen ra ngoài khung xanh. Hệ thống lấy câu hỏi + 4 lựa chọn
-      và tự đổi dấu tròn thành <b>a. b. c. d.</b>
+      Đặt thanh tiêu đề đen phía trên khung xanh. OCR tự cắt vùng chữ, tăng tương phản
+      và chuyển 4 lựa chọn thành <b>a. b. c. d.</b>
     </p>
 
     <div class="status" id="status">Nhấn “Mở camera” để bắt đầu.</div>
@@ -362,9 +362,14 @@
         <input id="autoGemini" type="checkbox" checked>
         Tự hỏi Gemini sau khi OCR ổn định
       </label>
+      <label class="toggle-line">
+        <input id="visionFallback" type="checkbox" checked>
+        Nếu OCR kém, cho phép Gemini đọc trực tiếp ảnh
+      </label>
       <div id="geminiAnswer" class="gemini-answer">Chưa có câu trả lời.</div>
       <div class="gemini-actions">
         <button class="primary" id="askGeminiBtn">✨ Hỏi Gemini</button>
+        <button id="visionBtn">👁 Gemini đọc ảnh</button>
         <button id="copyGeminiBtn">📋 Copy đáp án</button>
       </div>
       <div class="gemini-note">Câu lệnh mặc định: chỉ chọn đáp án đúng, không giải thích. API key không được ghi cố định vào file HTML.</div>
@@ -420,8 +425,10 @@
   const geminiKey = document.getElementById('geminiKey');
   const toggleKeyBtn = document.getElementById('toggleKeyBtn');
   const autoGemini = document.getElementById('autoGemini');
+  const visionFallback = document.getElementById('visionFallback');
   const geminiAnswer = document.getElementById('geminiAnswer');
   const askGeminiBtn = document.getElementById('askGeminiBtn');
+  const visionBtn = document.getElementById('visionBtn');
   const copyGeminiBtn = document.getElementById('copyGeminiBtn');
 
   let stream = null;
@@ -432,6 +439,9 @@
   let autoTimer = null;
   let lastNormalized = "";
   let stableHits = 0;
+  let lowOcrHits = 0;
+  let visionBusy = false;
+  let lastVisionAt = 0;
 
   let geminiBusy = false;
   let lastGeminiQuestion = "";
@@ -490,7 +500,7 @@
       });
 
       await worker.setParameters({
-        tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode: '6',
         preserve_interword_spaces: '1'
       });
 
@@ -522,12 +532,22 @@
       video.srcObject = stream;
       await video.play();
 
+      // Ưu tiên lấy nét liên tục khi trình duyệt/camera hỗ trợ.
+      try{
+        const track = stream.getVideoTracks()[0];
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        const advanced = {};
+        if(Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) advanced.focusMode = 'continuous';
+        if(Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) advanced.exposureMode = 'continuous';
+        if(Object.keys(advanced).length) await track.applyConstraints({advanced:[advanced]});
+      }catch(e){}
+
       cameraState.textContent = 'đang mở';
       startBtn.disabled = true;
       scanBtn.disabled = false;
       autoBtn.disabled = false;
       stopBtn.disabled = false;
-      setStatus('Camera đã mở. Căn phần câu hỏi + 4 đáp án vào khung xanh.');
+      setStatus('Camera đã mở. Để thanh tiêu đề đen ở trên khung; câu hỏi + 4 đáp án nằm trong khung xanh.');
 
       loadOCR();
     }catch(err){
@@ -588,54 +608,122 @@
     return {sx,sy,sw,sh};
   }
 
-  function preprocess(){
+  function getCleanCapture(){
     if(!video.videoWidth) throw new Error('Camera chưa sẵn sàng');
 
-    const {sx,sy,sw,sh} = getCropRect();
+    let {sx,sy,sw,sh} = getCropRect();
 
-    // Ảnh ROI gốc
-    capture.width = Math.round(sw);
-    capture.height = Math.round(sh);
+    // Bỏ thêm ~5% đầu của khung để chống dính mép thanh tiêu đề/đồng hồ.
+    const extraTop = sh * 0.05;
+    sy += extraTop;
+    sh -= extraTop;
+
+    // Chụp ROI gốc.
+    const raw = document.createElement('canvas');
+    raw.width = Math.max(1, Math.round(sw));
+    raw.height = Math.max(1, Math.round(sh));
+    const rctx = raw.getContext('2d', {willReadFrequently:true});
+    rctx.drawImage(video, sx, sy, sw, sh, 0, 0, raw.width, raw.height);
+
+    // Tự tìm hàng đầu/cuối có chữ tối để bỏ khoảng trắng lớn bên dưới.
+    const img = rctx.getImageData(0,0,raw.width,raw.height);
+    const d = img.data;
+    const rowCounts = new Uint32Array(raw.height);
+    for(let y=0;y<raw.height;y++){
+      let dark = 0;
+      const base = y * raw.width * 4;
+      for(let x=0;x<raw.width;x+=2){
+        const i = base + x*4;
+        const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+        if(g < 105) dark++;
+      }
+      rowCounts[y] = dark;
+    }
+
+    const minDark = Math.max(7, Math.floor(raw.width * 0.002));
+    let first = -1, last = -1;
+    for(let y=0;y<raw.height;y++){
+      // Dòng chữ thường có một lượng điểm tối vừa phải; tránh thanh đen đặc.
+      const c = rowCounts[y];
+      if(c >= minDark && c < raw.width * 0.20){ first = y; break; }
+    }
+    for(let y=raw.height-1;y>=0;y--){
+      const c = rowCounts[y];
+      if(c >= minDark && c < raw.width * 0.20){ last = y; break; }
+    }
+
+    if(first >= 0 && last > first){
+      first = Math.max(0, first - 14);
+      last = Math.min(raw.height-1, last + 20);
+    }else{
+      first = 0; last = raw.height-1;
+    }
+
+    capture.width = raw.width;
+    capture.height = Math.max(1, last-first+1);
     const cctx = capture.getContext('2d', {willReadFrequently:true});
-    cctx.drawImage(video, sx, sy, sw, sh, 0, 0, capture.width, capture.height);
+    cctx.drawImage(raw, 0, first, raw.width, capture.height, 0, 0, raw.width, capture.height);
+    return capture;
+  }
 
-    // Phóng ảnh để OCR chữ nhỏ tốt hơn
-    const upscale = Math.min(2.0, Math.max(1.35, 1500 / capture.width));
-    processCanvas.width = Math.round(capture.width * upscale);
-    processCanvas.height = Math.round(capture.height * upscale);
+  function otsuThreshold(data){
+    const hist = new Uint32Array(256);
+    let total = 0;
+    for(let i=0;i<data.length;i+=4){
+      const g = Math.max(0, Math.min(255, Math.round(0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2])));
+      hist[g]++; total++;
+    }
+    let sum = 0;
+    for(let i=0;i<256;i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, maxVar = -1, threshold = 160;
+    for(let t=0;t<256;t++){
+      wB += hist[t];
+      if(!wB) continue;
+      const wF = total - wB;
+      if(!wF) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB;
+      const mF = (sum - sumB) / wF;
+      const between = wB * wF * (mB-mF) * (mB-mF);
+      if(between > maxVar){ maxVar = between; threshold = t; }
+    }
+    return threshold;
+  }
 
+  function preprocess(mode='gray'){
+    const src = getCleanCapture();
+
+    // Phóng lớn chữ nhỏ. Không phóng quá mạnh vì ảnh chụp màn hình dễ sinh moiré.
+    const upscale = Math.min(2.15, Math.max(1.45, 1700 / Math.max(1, src.width)));
+    processCanvas.width = Math.round(src.width * upscale);
+    processCanvas.height = Math.round(src.height * upscale);
     const pctx = processCanvas.getContext('2d', {willReadFrequently:true});
     pctx.imageSmoothingEnabled = true;
     pctx.imageSmoothingQuality = 'high';
-    pctx.drawImage(capture, 0, 0, processCanvas.width, processCanvas.height);
 
-    const img = pctx.getImageData(0,0,processCanvas.width,processCanvas.height);
-    const d = img.data;
-    const manualThreshold = Number(thresholdRange.value);
+    if(mode === 'gray'){
+      // Giữ anti-alias của chữ; cách này tốt hơn nhị phân hóa cứng với ảnh chụp màn hình.
+      pctx.filter = 'grayscale(1) contrast(165%) brightness(112%)';
+      pctx.drawImage(src,0,0,processCanvas.width,processCanvas.height);
+      pctx.filter = 'none';
+    }else{
+      pctx.filter = 'grayscale(1) contrast(135%) brightness(108%)';
+      pctx.drawImage(src,0,0,processCanvas.width,processCanvas.height);
+      pctx.filter = 'none';
 
-    // grayscale + tương phản nhẹ + threshold tùy chọn
-    let sum = 0, count = 0;
-    for(let i=0;i<d.length;i+=4){
-      const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      sum += gray;
-      count++;
+      const img = pctx.getImageData(0,0,processCanvas.width,processCanvas.height);
+      const d = img.data;
+      let threshold = Number(thresholdRange.value);
+      if(!threshold) threshold = otsuThreshold(d);
+      // Với ảnh nền trắng, Otsu đôi lúc lấy ngưỡng quá thấp/cao; chặn về vùng an toàn.
+      threshold = Math.max(115, Math.min(205, threshold));
+      for(let i=0;i<d.length;i+=4){
+        const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+        const v = g < threshold ? 0 : 255;
+        d[i]=d[i+1]=d[i+2]=v; d[i+3]=255;
+      }
+      pctx.putImageData(img,0,0);
     }
-    const mean = sum / count;
-    const threshold = manualThreshold || Math.max(105, Math.min(190, mean * 0.90));
-
-    for(let i=0;i<d.length;i+=4){
-      let gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-
-      // tăng tương phản
-      gray = (gray - 128) * 1.35 + 128;
-
-      // Nếu nền sáng giống ảnh đề thi: trắng nền, đen chữ
-      const v = gray > threshold ? 255 : 0;
-      d[i] = d[i+1] = d[i+2] = v;
-      d[i+3] = 255;
-    }
-    pctx.putImageData(img,0,0);
-
     return processCanvas;
   }
 
@@ -653,7 +741,10 @@
       /nv\s*tín\s*dụng/.test(x) ||
       /chức danh/.test(x) ||
       /kiểm tra/.test(x) ||
-      /kỳ\s*ii/.test(x)
+      /kỳ\s*ii/.test(x) ||
+      /thời\s*gian\s*còn\s*lại/.test(x) ||
+      /fret/.test(x) ||
+      /^ar\s/.test(x)
     );
   }
 
@@ -732,6 +823,32 @@
     ].join('\n');
   }
 
+  function hasFourOptions(text){
+    return /(?:^|\n)a\.\s+/i.test(text) && /(?:^|\n)b\.\s+/i.test(text) &&
+           /(?:^|\n)c\.\s+/i.test(text) && /(?:^|\n)d\.\s+/i.test(text);
+  }
+
+  function ocrScore(data, normalized){
+    let s = Number(data?.confidence || 0);
+    const t = normalized || '';
+    if(t.length > 80) s += 12;
+    if(t.includes('?')) s += 7;
+    if(hasFourOptions(t)) s += 35;
+    if(/thời gian còn lại|fret/i.test(t)) s -= 25;
+    return s;
+  }
+
+  function tokenSimilarity(a,b){
+    const norm = s => new Set((s || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').trim().split(/\s+/).filter(x=>x.length>1));
+    const A = norm(a), B = norm(b);
+    if(!A.size || !B.size) return 0;
+    let inter = 0;
+    A.forEach(x => { if(B.has(x)) inter++; });
+    return inter / Math.max(A.size, B.size);
+  }
+
   function setGeminiAnswer(text, loading=false){
     geminiAnswer.textContent = text;
     geminiAnswer.classList.toggle('loading', loading);
@@ -800,6 +917,89 @@
     }
   }
 
+  async function askGeminiVision(auto=false){
+    if(visionBusy || geminiBusy) return false;
+    const apiKey = geminiKey.value.trim();
+    if(!apiKey){
+      if(!auto){ setGeminiAnswer('Cần dán Gemini API key để Gemini đọc trực tiếp ảnh.'); geminiKey.focus(); }
+      return false;
+    }
+    if(auto && Date.now() - lastVisionAt < 8000) return false;
+
+    visionBusy = true;
+    visionBtn.disabled = true;
+    lastVisionAt = Date.now();
+    if(!auto) setGeminiAnswer('Gemini đang đọc trực tiếp ảnh...', true);
+    setStatus('OCR cục bộ chưa rõ — đang dùng Gemini đọc ảnh...');
+
+    try{
+      // Chụp lại ROI sạch, không gửi phần tiêu đề đen.
+      getCleanCapture();
+      const base64 = capture.toDataURL('image/jpeg', 0.90).split(',')[1];
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+      const prompt = [
+        'Đọc chính xác câu hỏi trắc nghiệm tiếng Việt trong ảnh.',
+        'Bỏ qua mọi tiêu đề, đồng hồ đếm giờ, thanh trạng thái và chữ ngoài câu hỏi.',
+        'Có đúng 1 câu hỏi và tối đa 4 lựa chọn theo thứ tự từ trên xuống.',
+        'Trả về JSON thuần, không markdown, đúng cấu trúc:',
+        '{"question":"...","options":["...","...","...","..."],"answer_letter":"a|b|c|d"}',
+        'answer_letter là đáp án đúng. Không giải thích.'
+      ].join('\n');
+
+      const payload = {
+        contents: [{ role:'user', parts:[
+          {text: prompt},
+          {inline_data:{mime_type:'image/jpeg', data:base64}}
+        ]}],
+        generationConfig: {
+          temperature: 0.05,
+          maxOutputTokens: 500,
+          responseMimeType: 'application/json',
+          thinkingConfig: {thinkingLevel:'low'}
+        }
+      };
+
+      const res = await fetch(url, {
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-goog-api-key':apiKey},
+        body:JSON.stringify(payload)
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+      let txt = extractGeminiText(data).trim();
+      txt = txt.replace(/^```json\s*/i,'').replace(/\s*```$/,'').trim();
+      const obj = JSON.parse(txt);
+      if(!obj.question || !Array.isArray(obj.options) || obj.options.length < 4){
+        throw new Error('Không đọc đủ câu hỏi và 4 đáp án.');
+      }
+      const opts = obj.options.slice(0,4).map(x => String(x).trim());
+      const standardized = [
+        String(obj.question).trim(), '',
+        'a. '+opts[0], 'b. '+opts[1], 'c. '+opts[2], 'd. '+opts[3]
+      ].join('\n');
+      output.value = standardized;
+      lastNormalized = standardized;
+      stableHits = 2;
+      lowOcrHits = 0;
+
+      const letter = String(obj.answer_letter || '').toLowerCase().match(/[a-d]/)?.[0] || '';
+      const idx = 'abcd'.indexOf(letter);
+      if(idx >= 0) setGeminiAnswer(letter + '. ' + opts[idx]);
+      else setGeminiAnswer('Đã OCR bằng Gemini. Nhấn “Hỏi Gemini” để chọn đáp án.');
+      lastGeminiQuestion = standardized;
+      setStatus('Gemini đã đọc lại ảnh rõ hơn ✓');
+      return true;
+    }catch(err){
+      console.error(err);
+      if(!auto) setGeminiAnswer('Lỗi Gemini đọc ảnh: ' + (err?.message || 'Không xác định'));
+      setStatus('Gemini chưa đọc được ảnh. Hãy giữ máy thẳng và thử lại.');
+      return false;
+    }finally{
+      visionBusy = false;
+      visionBtn.disabled = false;
+    }
+  }
+
   function queueGemini(question){
     clearTimeout(geminiDebounce);
     if(!autoGemini.checked || !geminiKey.value.trim()) return;
@@ -821,32 +1021,59 @@
     scanning = true;
     scanBtn.disabled = true;
     ocrState.textContent = 'đang đọc...';
-    setStatus('Đang OCR trong khung xanh...');
+    setStatus('Đang OCR vùng câu hỏi...');
 
     try{
-      const img = preprocess();
-      const { data } = await worker.recognize(img);
-      const normalized = normalizeQuiz(data.text || '');
+      // PASS 1: ảnh xám tương phản cao — giữ viền chữ, chống moiré tốt hơn.
+      let img = preprocess('gray');
+      let r1 = await worker.recognize(img);
+      let n1 = normalizeQuiz(r1.data.text || '');
+      let s1 = ocrScore(r1.data, n1);
+
+      let best = {data:r1.data, normalized:n1, score:s1, mode:'gray'};
+
+      // PASS 2 chỉ chạy khi pass 1 chưa đủ tốt: Otsu nhị phân để cứu chữ mờ.
+      if(s1 < 105 || !hasFourOptions(n1)){
+        img = preprocess('binary');
+        const r2 = await worker.recognize(img);
+        const n2 = normalizeQuiz(r2.data.text || '');
+        const s2 = ocrScore(r2.data, n2);
+        if(s2 > best.score) best = {data:r2.data, normalized:n2, score:s2, mode:'binary'};
+      }
+
+      const normalized = best.normalized;
+      const conf = Math.round(best.data.confidence || 0);
+      const structured = hasFourOptions(normalized);
+      const good = structured && normalized.length > 70 && best.score >= 92;
 
       if(normalized){
-        if(normalized === lastNormalized){
-          stableHits++;
+        const sim = tokenSimilarity(normalized, lastNormalized);
+        if(lastNormalized && sim >= 0.90) stableHits++;
+        else stableHits = 0;
+
+        // Chỉ ghi đè kết quả khi OCR có cấu trúc hoặc chưa có kết quả trước đó.
+        if(good || !output.value.trim()) output.value = normalized;
+        lastNormalized = normalized;
+
+        if(good){
+          lowOcrHits = 0;
+          setStatus(`OCR rõ ${conf}% • ${best.mode === 'gray' ? 'chống moiré' : 'nhị phân'}${stableHits >= 1 ? ' • ổn định ✓' : ''}`);
+          if(stableHits >= 1) queueGemini(output.value.trim());
         }else{
-          stableHits = 0;
-          lastNormalized = normalized;
+          lowOcrHits++;
+          setStatus(`OCR còn mờ (${conf}%). Đang tối ưu lại vùng chữ...`);
+
+          // Nếu 2 lần liên tiếp vẫn kém và đã có API key, cho Gemini Vision cứu OCR.
+          if(lowOcrHits >= 2 && visionFallback.checked && geminiKey.value.trim()){
+            await askGeminiVision(true);
+          }
         }
-
-        output.value = normalized;
-
-        const conf = Math.round(data.confidence || 0);
-        setStatus(
-          'Đã nhận dạng • độ tin cậy khoảng ' + conf + '%'
-          + (stableHits >= 1 ? ' • nội dung đã ổn định ✓' : '')
-        );
-
-        if(stableHits >= 1){ queueGemini(normalized); }
       }else{
-        setStatus('Chưa đọc rõ. Đưa máy gần hơn, giữ thẳng và tránh rung.');
+        lowOcrHits++;
+        setStatus('Chưa bắt được chữ. Đưa câu hỏi vào giữa khung xanh và giữ máy thẳng.');
+        if(lowOcrHits >= 2 && visionFallback.checked && geminiKey.value.trim()){
+          await askGeminiVision(true);
+        }
       }
     }catch(err){
       console.error(err);
@@ -913,12 +1140,14 @@
     output.value = '';
     lastNormalized = '';
     stableHits = 0;
+    lowOcrHits = 0;
     lastGeminiQuestion = '';
     setGeminiAnswer('Chưa có câu trả lời.');
     setStatus('Đã xóa kết quả.');
   });
 
   askGeminiBtn.addEventListener('click', () => askGemini());
+  visionBtn.addEventListener('click', () => askGeminiVision(false));
 
   copyGeminiBtn.addEventListener('click', async () => {
     const text = geminiAnswer.textContent.trim();
